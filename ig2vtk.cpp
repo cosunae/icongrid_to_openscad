@@ -22,7 +22,8 @@
 #include <fstream> 
 #include <iostream>
 #include <boost/lexical_cast.hpp>
-
+#include <boost/program_options.hpp>
+#include <boost/filesystem.hpp>
 #include <vtkVersion.h>
 #include <vtkSmartPointer.h>
 #include <vtkPolygon.h>
@@ -50,7 +51,7 @@
 #define MAX_NDIMS 40
 
 
-void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::vector<double>& carty_vert, std::vector<double>& cartz_vert, std::vector<double>& vertex_cell, int ndiamonds_to_label=0)
+void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::vector<double>& carty_vert, std::vector<double>& cartz_vert, std::vector<double>& vertex_cell, bool doLabel, int ndiamonds_to_label=0)
 {
     assert( cartx_vert.size() == carty_vert.size() && cartx_vert.size() == cartz_vert.size() );
     assert(vertex_cell.size()%3==0);
@@ -70,7 +71,11 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
     // Setup vertex points for labels
     vtkSmartPointer<vtkPoints> pointsLabels = vtkSmartPointer<vtkPoints>::New();
 
-    for(int i=0; i < ncells_per_diamond*ndiamonds_to_label; ++i){
+    int ncells_side = std::sqrt(ncells_per_diamond);
+    int nvertex_to_display = (std::pow(ncells_side-2,2)/2 + (ncells_side-2)/2+ ncells_side*3) * ndiamonds_to_label;
+
+//    for(int i=0; i < ncells_per_diamond*ndiamonds_to_label; ++i){
+    for(int i=0; i < nvertex_to_display; ++i){
         pointsLabels->InsertNextPoint(cartx_vert[i], carty_vert[i], cartz_vert[i] );
     }
 
@@ -115,10 +120,13 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
 
     vtkSmartPointer<vtkCellArray> polygonsLabels = vtkSmartPointer<vtkCellArray>::New();
 
-    for(int i=0; i < ncells/20; ++i)
+    int ncells_to_display = std::pow(ncells_side,2)*ndiamonds_to_label;
+    
+    for(int i=0; i < ncells_to_display; ++i)
     {
           polygonsLabels->InsertNextCell(3, &(faces[i*3]));
     }
+
 
     // Create a PolyData to draw faces
     vtkSmartPointer<vtkPolyData> polygonPolyData = vtkSmartPointer<vtkPolyData>::New();
@@ -133,7 +141,7 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
    
     // Create a PolyData to draw labels
     vtkSmartPointer<vtkPolyData> polyDataLabels =vtkSmartPointer<vtkPolyData>::New();
-    polyDataLabels->SetPoints(points);
+    polyDataLabels->SetPoints(pointsLabels);
     polyDataLabels->SetPolys(polygonsLabels);
     
     vtkUnsignedCharArray *faceColors = vtkUnsignedCharArray::New(); 
@@ -214,6 +222,7 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
       vtkSmartPointer<vtkLabeledDataMapper> ldm = vtkSmartPointer<vtkLabeledDataMapper>::New();
     ldm->SetInputConnection( ids->GetOutputPort() );
     ldm->SetLabelModeToLabelFieldData();
+    ldm->GetLabelTextProperty()->SetColor( 0, 0.1, 0.4 );
 
 
   // Create labels for cells
@@ -253,9 +262,10 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
  
     renderer->AddActor(actor);
     renderer->AddActor(actorLines);
-//  renderer->AddActor2D(pointLabels);
-    renderer->AddActor2D(cellLabels);
-//    renderer->SetBackground(.5,.3,.31); // Background color salmon
+    if(doLabel) {
+        renderer->AddActor2D(pointLabels);
+        renderer->AddActor2D(cellLabels);
+    }
     renderer->SetBackground(0.36, 0.36, 0.36);
  
     renderWindow->Render();
@@ -265,12 +275,49 @@ void vtk_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::ve
 
 int main(int argc, char** argv)
 {  
+   namespace po = boost::program_options;
 
-   if(argc < 2) {
-     printf("Error, need to specify input file");
-     exit(1);
+   int ndiamonds_label=0;
+   bool doLabels= false;
+
+   // Declare the supported options.
+   po::options_description desc("Allowed options");
+   desc.add_options()
+      ("help", "produce help message")
+      ("label", "label all cells and vertices")
+      ("ndiamonds-label", po::value<int>(&ndiamonds_label)->default_value(1),  "number of diamonds to label (-1 for all)")
+      ("input-file", po::value< std::vector<std::string> >(), "input file")
+   ;
+   
+   po::positional_options_description p;
+   p.add("input-file", -1);
+
+   po::variables_map vm;
+   po::store(po::command_line_parser(argc, argv).options(desc).positional(p).run(), vm);
+   po::notify(vm);    
+
+   if (vm.count("help")) {
+       std::cout << desc << "\n";
+       return 1;
    }
-   std::string ncfilename = argv[1];
+
+   if(!vm.count("input-file"))
+   { 
+       std::cout << "Error: need to specify input file" << std::endl;
+       std::cout << desc << std::endl;
+       return 1;
+   }
+
+   const std::string ncfilename = vm["input-file"].as< std::vector<std::string> >()[0];
+   
+   if ( !boost::filesystem::exists( ncfilename ) )
+   {
+       std::cout << "Can't find netcdf file!" << std::endl;
+       return 1;
+   }
+
+   if(vm.count("label")) doLabels=true;
+
 
    int ncid;
    int ierror = nc_open(ncfilename.c_str(), NC_NOWRITE, & ncid);
@@ -355,7 +402,7 @@ int main(int argc, char** argv)
    ierror = nc_get_var_double(ncid, vertex_cell_id, &vertex_cell[0]);
    assert(ierror==NC_NOERR);
 
-   vtk_render(cell_dimlen/20, cartx_vert, carty_vert, cartz_vert, vertex_cell);
+   vtk_render(cell_dimlen/20, cartx_vert, carty_vert, cartz_vert, vertex_cell, doLabels, ndiamonds_label);
 
 
    nc_close(ncid);
