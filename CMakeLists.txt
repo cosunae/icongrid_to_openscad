@@ -10,6 +10,10 @@ include(${VTK_USE_FILE})
 
 add_executable(ig2vtk ig2vtk.cpp)
 
+add_executable(ig2gmsh ig2gmsh.cpp)
+
+target_link_libraries(ig2gmsh netcdf ${Boost_LIBRARIES})
+
 set(IG2VTK_LIBRARIES netcdf ${Boost_LIBRARIES})
 
 if(VTK_LIBRARIES)
