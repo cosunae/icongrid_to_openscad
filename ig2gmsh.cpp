@@ -25,47 +25,352 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include <iostream>
+#include <limits>
 
 #define MAX_NDIMS 40
+#define PI 3.1415
 
-
-void gmsh_render(int ncells_per_diamond, std::vector<double>& cartx_vert, std::vector<double>& carty_vert, std::vector<double>& cartz_vert, std::vector<double>& vertex_cell, bool doLabel, int nmpi=0)
+struct neighbours_of
 {
-    assert( cartx_vert.size() == carty_vert.size() && cartx_vert.size() == cartz_vert.size() );
-    assert(vertex_cell.size()%3==0);
+    neighbours_of(unsigned int neigh_dim, unsigned int n_nodes) :
+        m_neigh_dim(neigh_dim), m_data(n_nodes*neigh_dim) {}
 
-    std::ofstream pp;
-    pp.open("outgrid.msh");
-    pp << "$MeshFormat" << std::endl;
-    pp << "2.2 0 8" << std::endl;
-    pp << "$EndMeshFormat" << std::endl;
-    pp << "$Nodes" << std::endl;
-    pp << cartx_vert.size() << std::endl;
+    double* data_ptr() { return &(m_data[0]);}
 
-    int factor=10000000;
-    for(int i=0; i < cartx_vert.size(); ++i){
-        pp << i+1 << " " << (int)(cartx_vert[i]*factor) << " " << (int)(carty_vert[i]*factor) << " " << (int)(cartz_vert[i]*factor) << std::endl;
+    double& at(unsigned int nnode_id, unsigned int neigh_id) {
+        assert(nnode_id > 0);
+        assert(nnode_id -1 < n_nodes());
+        assert(neigh_id < m_neigh_dim);
+        return m_data[index(nnode_id, neigh_id)];
     }
 
-    pp << "$Elements" << std::endl;
-    int ncells = vertex_cell.size()/3;
+    unsigned int index(unsigned int node_id, unsigned int neigh_id){
+        return (node_id-1)*neigh_dim() + neigh_id;
+    }
 
-    int ncell_partition = ncells/nmpi;
-    if(ncell_partition%4)
-        ncell_partition += (4-ncell_partition%4);
-
-    pp << ncells << std::endl;
-
-    for(int i=0; i < ncells; ++i)
+    std::vector<double> neighbours_of_node(unsigned int node_id)
     {
-        int partition = i/ncell_partition;
-        pp << i+1 << " " << 2 << " " << 4 << " " << 1 << " " << 1 << " " << 1  << " " << partition << " " << vertex_cell[0*ncells + i] << " " << 
-            vertex_cell[1*ncells + i] << " " <<
-            vertex_cell[2*ncells + i] << " " << std::endl;
+        assert(node_id>0);
+        std::vector<double> res;
+        std::copy(m_data.begin() + index(node_id,0), m_data.begin() + index(node_id, neigh_dim()), std::back_inserter(res));
+        return res;
     }
 
-    pp << "$EndElements" << std::endl;
-}
+    void insert_node(std::vector<double> neighbours)
+    {
+        assert(neighbours.size() == m_neigh_dim);
+
+        std::copy(neighbours.begin(), neighbours.end(), std::back_inserter(m_data));
+    }
+
+    bool node_has_neighbour_in(unsigned int node_id, std::vector<unsigned int> list_id)
+    {
+        assert(node_id>0);
+        for(size_t i=0; i < neigh_dim(); ++i) {
+            if(std::find(list_id.begin(), list_id.end(), at(node_id, i)) != list_id.end()) return true;
+        }
+        return false;
+    }
+
+    unsigned int n_nodes() const {
+        assert((m_data.size() % m_neigh_dim)==0);
+        return m_data.size() / m_neigh_dim;}
+    unsigned int neigh_dim() const { return m_neigh_dim;}
+private: 
+    std::vector<double> m_data;
+    unsigned int m_neigh_dim;
+};
+
+class mesh
+{
+public:
+    mesh(unsigned int ncells, unsigned int nvertices, unsigned int n_vertices_of_cell, unsigned int n_vertices_of_vertex) :
+        m_n_vertices_of_cell(n_vertices_of_cell), m_n_vertices_of_vertex(n_vertices_of_vertex),
+        m_cartx_vert(nvertices), m_carty_vert(nvertices), m_cartz_vert(nvertices),
+        m_vertex_of_cell(n_vertices_of_cell, ncells), m_vertices_of_vertex(n_vertices_of_vertex, nvertices)
+    {}
+
+    std::vector<double >& cart_vert(unsigned int dim) {
+        assert(dim < 3);
+        if(dim == 0) return m_cartx_vert;
+        else if(dim == 1) return m_cartx_vert;
+        else if(dim == 2) return m_cartx_vert;
+    }
+    neighbours_of& vertex_of_cell() {return m_vertex_of_cell;}
+    neighbours_of& vertices_of_vertex() { return m_vertices_of_vertex;}
+
+    void insert_cart_vert(std::vector<double>& cartx, std::vector<double>& carty, std::vector<double>& cartz) {
+        assert(cartx.size() == carty.size() && carty.size() == cartz.size());
+        for(size_t i=0; i != cartx.size(); ++i)
+        {
+            (m_cartx_vert[i])= cartx[i];
+            (m_carty_vert[i]) = carty[i];
+            (m_cartz_vert[i]) = cartz[i];
+        }
+    }
+
+    void gmsh_render(bool doLabel, int nmpi=0)
+    {
+        std::ofstream pp;
+        pp.open("outgrid.msh");
+        pp << "$MeshFormat" << std::endl;
+        pp << "2.2 0 8" << std::endl;
+        pp << "$EndMeshFormat" << std::endl;
+        pp << "$Nodes" << std::endl;
+        pp << m_cartx_vert.size() << std::endl;
+
+        int factor=10000000;
+        for(int i=0; i < m_cartx_vert.size(); ++i){
+            pp << i+1 << " " << (int)((m_cartx_vert[i])*factor) << " " << (int)((m_carty_vert[i])*factor) << " " <<
+                                (int)((m_cartz_vert[i])*factor) << std::endl;
+        }
+
+        pp << "$Elements" << std::endl;
+
+        int ncell_partition = ncells()/nmpi;
+        if(ncell_partition%4)
+            ncell_partition += (4-ncell_partition%4);
+
+        pp << ncells() << std::endl;
+
+        for(int i=0; i < ncells(); ++i)
+        {
+            int partition = i/ncell_partition;
+            pp << i+1 << " " << 2 << " " << 4 << " " << 1 << " " << 1 << " " << 1  << " " << partition << " " <<
+                  m_vertex_of_cell.at(i+1, 0) << " " <<
+                m_vertex_of_cell.at(i+1,1) << " " <<
+                m_vertex_of_cell.at(i+1,2) << " " << std::endl;
+        }
+
+        pp << "$EndElements" << std::endl;
+    }
+
+    void add_ghost_nodes()
+    {
+        auto north_pole = std::max_element(m_carty_vert.begin(), m_carty_vert.end());
+        auto south_pole = std::min_element(m_carty_vert.begin(), m_carty_vert.end());
+
+        int north_pole_idx = std::distance(m_carty_vert.begin(), north_pole);
+        int south_pole_idx = std::distance(m_carty_vert.begin(), south_pole);
+
+        std::vector<unsigned int> nodes_id_east_with_ghost, nodes_id_west_with_ghost;
+        recur_find_east(north_pole_idx, south_pole_idx, nodes_id_east_with_ghost);
+        recur_find_west(north_pole_idx, south_pole_idx, nodes_id_west_with_ghost);
+
+        insert_ghost_nodes(nodes_id_east_with_ghost, nodes_id_west_with_ghost);
+    }
+
+    void fill_from_netcdf(const int ncid, const int vertex_cell_id, const int vertices_of_vertex_id)
+    {
+
+        const unsigned int buffsize = std::max(m_vertex_of_cell.n_nodes(), m_vertices_of_vertex.n_nodes()) *
+                std::max(m_vertex_of_cell.neigh_dim(), m_vertices_of_vertex.neigh_dim());
+        std::vector<double> tmp(buffsize);
+
+        int ierror = nc_get_var_double(ncid, vertex_cell_id, &tmp[0]);
+        assert(ierror==NC_NOERR);
+        unsigned int n_nodes = m_vertex_of_cell.n_nodes();
+        unsigned int neigh_dim = m_vertex_of_cell.neigh_dim();
+
+        for(unsigned int node_it = 0; node_it != n_nodes; ++node_it)
+        {
+            for(unsigned int neigh_it = 0; neigh_it != neigh_dim; ++neigh_it)
+            {
+                assert(node_it + neigh_it*n_nodes < buffsize);
+                m_vertex_of_cell.at(node_it+1, neigh_it) = tmp[node_it + neigh_it*n_nodes];
+            }
+        }
+
+        ierror = nc_get_var_double(ncid, vertices_of_vertex_id, &tmp[0]);
+        assert(ierror==NC_NOERR);
+        n_nodes = m_vertices_of_vertex.n_nodes();
+        neigh_dim = m_vertices_of_vertex.neigh_dim();
+
+        for(unsigned int node_it = 0; node_it != n_nodes; ++node_it)
+        {
+            for(unsigned int neigh_it = 0; neigh_it != neigh_dim; ++neigh_it)
+            {
+                assert(node_it + neigh_it*n_nodes < buffsize);
+                m_vertices_of_vertex.at(node_it+1, neigh_it) = tmp[node_it + neigh_it*n_nodes];
+            }
+        }
+    }
+
+    unsigned int ncells() const { m_vertex_of_cell.n_nodes();}
+private:
+
+    void recur_find_west(unsigned int root_idx, unsigned int south_pole_idx, std::vector<unsigned int>& nodes_id_with_ghost)
+    {
+        double lat = m_carty_vert[root_idx];
+        const unsigned int root_id = root_idx+1;
+        const unsigned int south_pole_id = south_pole_idx+1;
+
+        double min_lon=std::numeric_limits<double>::max();
+        int next_id =0;
+        for(int vertex_cnt = 0; vertex_cnt != m_vertices_of_vertex.neigh_dim(); ++vertex_cnt)
+        {
+            int vertex_id = m_vertices_of_vertex.at(root_id, vertex_cnt);
+            if(vertex_id == 0) continue;
+
+            unsigned int vertex_idx = vertex_id-1;
+
+            if(m_carty_vert[vertex_idx] > lat) continue;
+
+            if(vertex_id == south_pole_id) return;
+
+            if(min_lon > m_cartx_vert[vertex_idx]) {
+                min_lon = m_cartx_vert[vertex_idx];
+                next_id = vertex_id;
+            }
+        }
+
+        nodes_id_with_ghost.push_back(next_id);
+        recur_find_west(next_id-1, south_pole_idx, nodes_id_with_ghost);
+    }
+
+    void recur_find_east(unsigned int root_idx, unsigned int south_pole_idx, std::vector<unsigned int>& nodes_id_with_ghost)
+    {
+        double lat = m_carty_vert[root_idx];
+        const unsigned int root_id = root_idx+1;
+        const unsigned int south_pole_id = south_pole_idx+1;
+
+        double max_lon=-std::numeric_limits<double>::max();
+        int next_id =0;
+        for(int vertex_cnt = 0; vertex_cnt != m_vertices_of_vertex.neigh_dim(); ++vertex_cnt)
+        {
+            int vertex_id = m_vertices_of_vertex.at(root_id, vertex_cnt);
+            if(vertex_id == 0) continue;
+
+            unsigned int vertex_idx = vertex_id-1;
+
+            if(m_carty_vert[vertex_idx] > lat) continue;
+
+            if(vertex_id == south_pole_id) return;
+
+            if(max_lon < m_cartx_vert[vertex_idx]) {
+                max_lon = m_cartx_vert[vertex_idx];
+                next_id = vertex_id;
+            }
+        }
+
+        nodes_id_with_ghost.push_back(next_id);
+        recur_find_east(next_id-1, south_pole_idx, nodes_id_with_ghost);
+    }
+
+    void replace_and_insert_ghost_elements(std::vector<unsigned int>& east_nodes_id_with_ghost, std::vector<unsigned int>& west_nodes_id_with_ghost,
+                                           std::vector<unsigned int>& east_ghost_nodes_id, std::vector<unsigned int>& west_ghost_nodes_id)
+    {
+        std::vector< std::shared_ptr<std::vector<double> > > new_elements;
+        for(size_t element_cnt = 0; element_cnt != m_vertex_of_cell.n_nodes(); ++element_cnt)
+        {
+            if(m_vertex_of_cell.node_has_neighbour_in(element_cnt+1, east_nodes_id_with_ghost) &&
+                    m_vertex_of_cell.node_has_neighbour_in(element_cnt+1, west_nodes_id_with_ghost))
+            {
+
+                std::shared_ptr<std::vector<double> > orig_neigh = std::make_shared<std::vector<double> >(m_vertex_of_cell.neighbours_of_node(element_cnt+1));
+                for(int c=0; c != m_vertex_of_cell.neigh_dim(); ++c){
+                    std::vector<unsigned int>::iterator iter;
+                    while( (iter = std::find(west_nodes_id_with_ghost.begin(), west_nodes_id_with_ghost.end(), m_vertex_of_cell.at(element_cnt+1, c))) !=
+                            west_nodes_id_with_ghost.end())
+                    {
+                        unsigned int dist = std::distance(west_nodes_id_with_ghost.begin(), iter);
+                        m_vertex_of_cell.at(element_cnt+1, c) = east_ghost_nodes_id[dist];
+                    }
+
+                    while( (iter = std::find(east_nodes_id_with_ghost.begin(), east_nodes_id_with_ghost.end(), (*orig_neigh)[c])) !=
+                            east_nodes_id_with_ghost.end())
+                    {
+                        unsigned int dist = std::distance(east_nodes_id_with_ghost.begin(), iter);
+                        (*orig_neigh)[c] = west_ghost_nodes_id[dist];
+                    }
+                }
+                new_elements.push_back(orig_neigh);
+            }
+        }
+        for(int c=0; c != new_elements.size(); ++c)
+        {
+            m_vertex_of_cell.insert_node(*(new_elements[c]));
+        }
+
+    }
+
+    void insert_ghost_nodes(std::vector<unsigned int>& east_nodes_id_with_ghost,
+                            std::vector<unsigned int>& west_nodes_id_with_ghost)
+    {
+        std::vector<unsigned int> east_ghost_nodes_id;
+        std::vector<unsigned int> west_ghost_nodes_id;
+
+        for(size_t i= 0; i != east_nodes_id_with_ghost.size(); ++i)
+        {
+            unsigned int node_id = east_nodes_id_with_ghost[i];
+            double lat = m_carty_vert[node_id-1];
+
+            double newlon = m_cartx_vert[node_id-1]-2*PI;
+            unsigned int newnode_id = m_cartx_vert.size()+1;
+
+            m_cartx_vert.push_back(newlon);
+            m_carty_vert.push_back(lat);
+            m_cartz_vert.push_back(0);
+            west_ghost_nodes_id.push_back(newnode_id);
+        }
+
+        for(size_t i= 0; i != west_nodes_id_with_ghost.size(); ++i)
+        {
+            unsigned int node_id = west_nodes_id_with_ghost[i];
+            double lat = m_carty_vert[node_id-1];
+
+            double newlon = m_cartx_vert[node_id-1] + 2*PI;
+            unsigned int newnode_id = m_cartx_vert.size()+1;
+
+            m_cartx_vert.push_back(newlon);
+            m_carty_vert.push_back(lat);
+            m_cartz_vert.push_back(0);
+            east_ghost_nodes_id.push_back(newnode_id);
+        }
+
+        for(size_t i= 0; i != east_nodes_id_with_ghost.size(); ++i)
+        {
+            unsigned int node_id = east_nodes_id_with_ghost[i];
+
+            for(size_t c=0; c != m_vertices_of_vertex.neigh_dim(); ++c)
+            {
+                unsigned int neigh_node_id = m_vertices_of_vertex.at(node_id, c);
+
+                std::vector<unsigned int>::iterator iter;
+                if((iter = std::find(west_nodes_id_with_ghost.begin(), west_nodes_id_with_ghost.end(), neigh_node_id))
+                        != west_nodes_id_with_ghost.end() ) {
+                    m_vertices_of_vertex.at(node_id, c) = east_ghost_nodes_id[std::distance(west_nodes_id_with_ghost.begin(), iter)];
+                }
+            }
+        }
+
+        for(size_t i= 0; i != west_nodes_id_with_ghost.size(); ++i)
+        {
+            unsigned int node_id = west_nodes_id_with_ghost[i];
+
+            for(size_t c=0; c != m_vertices_of_vertex.neigh_dim(); ++c)
+            {
+                unsigned int neigh_node_id = m_vertices_of_vertex.at(node_id, c);
+
+                std::vector<unsigned int>::iterator iter;
+                if((iter = std::find(east_nodes_id_with_ghost.begin(), east_nodes_id_with_ghost.end(), neigh_node_id))
+                        != east_nodes_id_with_ghost.end() ) {
+                    m_vertices_of_vertex.at(node_id, c) = west_ghost_nodes_id[std::distance(east_nodes_id_with_ghost.begin(), iter)];
+                }
+            }
+        }
+
+        replace_and_insert_ghost_elements(east_nodes_id_with_ghost, west_nodes_id_with_ghost, east_ghost_nodes_id, west_ghost_nodes_id);
+    }
+
+    std::vector< double > m_cartx_vert;
+    std::vector< double > m_carty_vert;
+    std::vector< double > m_cartz_vert;
+
+    neighbours_of m_vertex_of_cell;
+    neighbours_of m_vertices_of_vertex;
+    unsigned int m_n_vertices_of_cell, m_n_vertices_of_vertex;
+};
 
 int main(int argc, char** argv)
 {  
@@ -83,6 +388,7 @@ int main(int argc, char** argv)
       ("ndiamonds-label", po::value<int>(&ndiamonds_label)->default_value(1),  "number of diamonds to label (-1 for all)")
       ("input-file", po::value< std::vector<std::string> >(), "input file")
       ("nmpi", po::value<int>(&nmpi)->default_value(1),  "number of mpi")
+      ("ndims", po::value<int>(&nmpi)->default_value(3),  "number of dimension for the gmesh")
    ;
    
    po::positional_options_description p;
@@ -110,6 +416,16 @@ int main(int argc, char** argv)
    {
        std::cout << "Can't find netcdf file!" << std::endl;
        return 1;
+   }
+
+   unsigned int ndims = 3;
+   if(vm.count("ndims"))
+   {
+       ndims = vm["ndims"].as<int>();
+       if(ndims != 3 && ndims != 2) {
+           std::cout << "Error: wrong number of dimensions" << std::endl;
+           return 1;
+       }
    }
 
    if(vm.count("label")) doLabels=true;
@@ -145,6 +461,12 @@ int main(int argc, char** argv)
    ierror= nc_inq_varid(ncid, "cartesian_z_vertices", &cartz_vert_id);
    assert(ierror==NC_NOERR);
 
+   int lon_vert_id, lat_vert_id;
+   ierror= nc_inq_varid(ncid, "longitude_vertices", &lon_vert_id);
+   assert(ierror==NC_NOERR);
+   ierror= nc_inq_varid(ncid, "latitude_vertices", &lat_vert_id);
+   assert(ierror==NC_NOERR);
+
 
    int cart_vert_numdim;
    ierror = nc_inq_varndims(ncid, cartx_vert_id, &cart_vert_numdim);
@@ -163,19 +485,6 @@ int main(int argc, char** argv)
    ierror = nc_inq_vardimid(ncid, cartz_vert_id, cart_vert_dimids);
    assert(ierror==NC_NOERR && cart_vert_dimids[0] == vertex_dimid);
 
-   std::vector<double> cartx_vert, carty_vert, cartz_vert;
-
-   cartx_vert.resize( vertex_dimlen );
-   carty_vert.resize( vertex_dimlen );
-   cartz_vert.resize( vertex_dimlen );
-
-   ierror = nc_get_var_double(ncid, cartx_vert_id, &cartx_vert[0]);
-   assert(ierror==NC_NOERR);
-   ierror= nc_get_var_double(ncid, carty_vert_id, &carty_vert[0]);
-   assert(ierror==NC_NOERR);
-   ierror= nc_get_var_double(ncid, cartz_vert_id, &cartz_vert[0]);
-   assert(ierror==NC_NOERR);
-
    int vertex_cell_id;
    ierror= nc_inq_varid(ncid, "vertex_of_cell", &vertex_cell_id);
    assert(ierror==NC_NOERR);
@@ -193,12 +502,66 @@ int main(int argc, char** argv)
    ierror = nc_inq_dimlen(ncid, vertex_cell_dimids[1], &vertex_cell_dimlens[1]);
    assert(ierror==NC_NOERR);
 
-   std::vector<double> vertex_cell;
-   vertex_cell.resize( vertex_cell_dimlens[0] * vertex_cell_dimlens[1] );
-   ierror = nc_get_var_double(ncid, vertex_cell_id, &vertex_cell[0]);
+   assert(vertex_cell_dimlens[1] == cell_dimlen);
+
+   int vertices_of_vertex_id;
+   ierror= nc_inq_varid(ncid, "vertices_of_vertex", &vertices_of_vertex_id);
+   assert(ierror==NC_NOERR);
+   int vertices_of_vertex_numdim;
+   ierror = nc_inq_varndims(ncid, vertices_of_vertex_id, &vertices_of_vertex_numdim);
+   assert(ierror==NC_NOERR && vertices_of_vertex_numdim==2);
+
+   int vertices_of_vertex_dimids[2];
+   size_t vertices_of_vertex_dimlens[2];
+   ierror = nc_inq_vardimid(ncid, vertices_of_vertex_id, vertices_of_vertex_dimids);
    assert(ierror==NC_NOERR);
 
-   gmsh_render(cell_dimlen/20, cartx_vert, carty_vert, cartz_vert, vertex_cell, doLabels, nmpi);
+   ierror = nc_inq_dimlen(ncid, vertices_of_vertex_dimids[0], &vertices_of_vertex_dimlens[0]);
+   assert(ierror==NC_NOERR);
+   ierror = nc_inq_dimlen(ncid, vertices_of_vertex_dimids[1], &vertices_of_vertex_dimlens[1]);
+
+   assert(vertex_dimlen == vertices_of_vertex_dimlens[1]);
+
+   assert(ierror==NC_NOERR);
+
+   // extract data from netcdf
+
+   mesh icon_mesh(vertex_cell_dimlens[1], vertices_of_vertex_dimlens[1], vertex_cell_dimlens[0], vertices_of_vertex_dimlens[0]);
+
+   std::vector<double> cartx_vert, carty_vert, cartz_vert;
+
+   cartx_vert.resize( vertex_dimlen );
+   carty_vert.resize( vertex_dimlen );
+   cartz_vert.resize( vertex_dimlen );
+
+   if(ndims == 3) {
+
+       ierror = nc_get_var_double(ncid, cartx_vert_id, &cartx_vert[0]);
+       assert(ierror==NC_NOERR);
+       ierror= nc_get_var_double(ncid, carty_vert_id, &carty_vert[0]);
+       assert(ierror==NC_NOERR);
+       ierror= nc_get_var_double(ncid, cartz_vert_id, &cartz_vert[0]);
+       assert(ierror==NC_NOERR);
+   }
+   else {
+       ierror = nc_get_var_double(ncid, lon_vert_id, &cartx_vert[0]);
+       assert(ierror==NC_NOERR);
+
+       ierror = nc_get_var_double(ncid, lat_vert_id, &carty_vert[0]);
+       assert(ierror==NC_NOERR);
+
+       for(size_t i=0; i < vertex_dimlen; ++i)
+           cartz_vert[i] = 0;
+   }
+   icon_mesh.insert_cart_vert(cartx_vert, carty_vert, cartz_vert);
+
+   icon_mesh.fill_from_netcdf(ncid, vertex_cell_id, vertices_of_vertex_id);
+
+   if(ndims==2) {
+       icon_mesh.add_ghost_nodes();
+   }
+
+   icon_mesh.gmsh_render(doLabels, nmpi);
 
    nc_close(ncid);
 };
